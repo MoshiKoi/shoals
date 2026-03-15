@@ -1,0 +1,1 @@
+Solution for [Cod golf: condense your shoal](https://codegolf.codidact.com/posts/295692)
