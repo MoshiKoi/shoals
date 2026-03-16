@@ -1,17 +1,20 @@
 #include <algorithm>
 #include <fstream>
-#include <map>
 #include <mdspan>
-#include <memory>
 #include <print>
+#include <ranges>
 #include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
-void scs_table_fill(std::string_view a, std::string_view b, auto scs) {
+void scs_table_fill(std::string_view a, std::string_view b,
+                    std::vector<std::size_t> &buffer) {
   auto const n = a.size();
   auto const m = b.size();
+  buffer.reserve((n + 1) * (m + 1));
+  std::mdspan scs{buffer.data(), n + 1, m + 1};
+
   for (std::size_t i = 0; i < n + 1; ++i) {
     scs[i, 0] = i;
   }
@@ -30,25 +33,22 @@ void scs_table_fill(std::string_view a, std::string_view b, auto scs) {
   }
 }
 
-std::size_t scs_length(std::string_view a, std::string_view b) {
+std::size_t scs_length(std::string_view a, std::string_view b,
+                       std::size_t *buffer) {
   auto const n = a.size();
   auto const m = b.size();
-  auto dp = std::make_unique<std::size_t[]>((n + 1) * (m + 1));
-
-  std::mdspan scs{dp.get(), n + 1, m + 1};
-  scs_table_fill(a, b, scs);
+  std::mdspan scs{buffer, n + 1, m + 1};
   return scs[n, m];
 }
 
-std::string scs_string(std::string_view a, std::string_view b) {
+std::string scs_string(std::string_view a, std::string_view b,
+                       std::size_t *buffer) {
   auto const n = a.size();
   auto const m = b.size();
-  auto dp = std::make_unique<std::size_t[]>((n + 1) * (m + 1));
 
-  std::mdspan scs{dp.get(), n + 1, m + 1};
-  scs_table_fill(a, b, scs);
-
+  std::mdspan scs{buffer, n + 1, m + 1};
   std::string result;
+  result.reserve(scs[n, m]);
 
   std::size_t i = n;
   std::size_t j = m;
@@ -81,6 +81,28 @@ std::string scs_string(std::string_view a, std::string_view b) {
   return result;
 }
 
+struct scs_pair {
+  double ratio;
+  std::string string;
+
+  auto operator<=>(scs_pair const &other) const = default;
+};
+
+bool has_subsequence(std::string_view a, std::string_view b) {
+  char const *p = a.data();
+  char const *end = a.data() + a.size();
+  for (char c : b) {
+    while (p != end and *p != c) {
+      ++p;
+    }
+    if (p == end) {
+      return false;
+    }
+    ++p;
+  }
+  return true;
+}
+
 int main(int argc, char **argv) {
   if (argc != 2) {
     std::println(stderr, "Usage: {} <file>", argv[0]);
@@ -90,99 +112,68 @@ int main(int argc, char **argv) {
   std::vector<std::string> fishes;
   std::ifstream ifs{argv[1]};
 
-  std::string buffer;
-  while (std::getline(ifs, buffer)) {
-    fishes.emplace_back(std::move(buffer));
+  std::string line;
+  while (std::getline(ifs, line)) {
+    fishes.emplace_back(std::move(line));
   }
 
   std::println("Read {} fishes", fishes.size());
 
-  std::map<std::string, std::set<std::string_view>> strings;
+  std::vector<std::size_t> buffer;
 
-  auto const count_fishes = [&](std::string_view string,
-                                std::set<std::string_view> &contains) {
-    for (std::string const &fish : fishes) {
-      if (string.size() >= fish.size() and
-          scs_length(string, fish) == string.size()) {
-        contains.emplace(fish);
-      }
-    }
+  auto const count_fishes = [&](std::string_view string) {
+    return std::ranges::count_if(fishes, [&](auto const &fish) {
+      return has_subsequence(string, fish);
+    });
   };
 
-  for (std::string const &fish : fishes) {
-    std::set<std::string_view> contains;
-    count_fishes(fish, contains);
-    strings.emplace(fish, std::move(contains));
+  std::set<std::string> strings{std::from_range, fishes};
+  std::set<scs_pair> pairs;
+
+  for (auto a = strings.begin(); a != strings.end(); ++a) {
+    for (auto b = strings.begin(); b != a; ++b) {
+      auto &a_str = *a;
+      auto &b_str = *b;
+      scs_table_fill(a_str, b_str, buffer);
+      auto scs = scs_string(a_str, b_str, buffer.data());
+
+      if (strings.contains(scs)) {
+        continue;
+      }
+
+      auto count = count_fishes(scs);
+      double ratio = static_cast<double>(scs.size()) / count;
+      pairs.emplace(ratio, scs);
+    }
   }
 
+  std::string current_solution;
+
   while (true) {
-    decltype(strings)::iterator best_a, best_b;
-    std::size_t best_delta = std::numeric_limits<std::size_t>::max();
+    auto iter = pairs.begin();
+    auto count = count_fishes(iter->string);
 
-    auto const reset_best = [&] {
-      best_delta = std::numeric_limits<std::size_t>::max();
-      best_a = {};
-      best_b = {};
-    };
+    if (count >= 255) {
+      if (iter->string.size() < current_solution.size() ||
+          current_solution.empty()) {
+        std::println("Possible solution: {} ({}, {}, {})", iter->string, iter->string.size(), count, iter->ratio);
+        current_solution = iter->string;
+      }
+    } else {
+      for (auto &a_str : strings) {
+        scs_table_fill(a_str, iter->string, buffer);
+        auto scs = scs_string(a_str, iter->string, buffer.data());
 
-    auto a = strings.begin();
-  outer:
-    while (a != strings.end()) {
-      auto b = strings.begin();
-      while (b != a) {
-        auto &[a_str, a_set] = *a;
-        auto &[b_str, b_set] = *b;
-        auto scs_len = scs_length(a_str, b_str);
-        // is this a good heuristic? who knows
-        auto delta = scs_len - std::max(a_str.size(), b_str.size());
-        if (delta == 0) {
-          if (a_str.size() > b_str.size()) {
-            if (best_a == b or best_b == b) {
-              reset_best();
-            }
-            std::println("'{}' -> '{}'", b_str, a_str);
-            b = strings.erase(b);
-          } else {
-            if (best_a == a or best_b == a) {
-              reset_best();
-            }
-            std::println("'{}' -> '{}'", a_str, b_str);
-            a = strings.erase(a);
-            goto outer;
-          }
-        } else if (delta < best_delta) {
-          best_a = a;
-          best_b = b;
-          best_delta = delta;
-          ++b;
-        } else {
-          ++b;
+        if (strings.contains(scs)) {
+          continue;
         }
+
+        auto count = count_fishes(scs);
+        double ratio = static_cast<double>(scs.size()) / count;
+        pairs.emplace(ratio, scs);
       }
-      ++a;
+      strings.emplace(iter->string);
     }
-
-    if (best_delta == std::numeric_limits<std::size_t>::max()) {
-      continue;
-    }
-
-    auto &[a_str, a_set] = *best_a;
-    auto &[b_str, b_set] = *best_b;
-
-    auto scs = scs_string(a_str, b_str);
-    std::set<std::string_view> merged;
-    count_fishes(scs, merged);
-    if (merged.size() >= 255) {
-      std::println("{}", scs);
-      for (auto const &fish : merged) {
-        std::print("'{}' ", fish);
-      }
-      break;
-    }
-
-    std::println("'{}' '{}' -> '{}' ({})", a_str, b_str, scs, merged.size());
-    strings.erase(best_a);
-    strings.erase(best_b);
-    strings.emplace(std::move(scs), std::move(merged));
+    pairs.erase(iter);
   }
 }
